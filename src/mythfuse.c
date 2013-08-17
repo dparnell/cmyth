@@ -52,6 +52,7 @@ struct myth_conn {
 struct path_info {
 	char *host;
 	char *dir;
+  char *subdir;
 	char *file;
 };
 
@@ -93,9 +94,13 @@ static int rd_all(struct path_info*, void*, fuse_fill_dir_t, off_t,
 		  struct fuse_file_info*);
 static int ga_all(struct path_info*, struct stat*);
 
+static int rd_shows(struct path_info*, void*, fuse_fill_dir_t, off_t,
+		  struct fuse_file_info*);
+
 static struct dir_cb dircb[] = {
 	{ "files", rd_files, ga_files, o_files },
 	{ "all", rd_all, ga_all, NULL },
+  { "shows", rd_shows, ga_files, o_files },
 	{ NULL, NULL, NULL, NULL },
 };
 
@@ -256,7 +261,7 @@ lookup_path(const char *path, struct path_info *info)
 		}
 	} while ((f != NULL) && (i < 8));
 
-	debug("%s(): found %d parts\n", __FUNCTION__, i);
+	debug("%s(): '%s' found %d parts\n", __FUNCTION__, path, i);
 
 	if (i == 8) {
 		ret = -ENOENT;
@@ -265,16 +270,23 @@ lookup_path(const char *path, struct path_info *info)
 
 	parts[i] = strdup(p+1);
 
+  char is_shows = i>=2 ? strcmp(parts[1], "shows") : 1;
 	if ((i >= 2) && 
 	    ((strcmp(parts[1], "files") != 0) &&
-	     (strcmp(parts[1], "all") != 0))) {
+	     (strcmp(parts[1], "all") != 0) &&
+       (is_shows != 0))) {
 		ret = -ENOENT;
 		goto out;
 	}
 
 	info->host = parts[0];
 	info->dir = parts[1];
-	info->file = parts[2];
+  if(is_shows == 0) {
+    info->subdir = parts[2];
+    info->file = parts[3];
+  } else {
+    info->file = parts[2];
+  }
 
 	debug("%s(): host '%s' file '%s'\n", __FUNCTION__,
 	      info->host, info->file);
@@ -612,6 +624,116 @@ rd_all(struct path_info *info, void *buf, fuse_fill_dir_t filler,
 		ref_release(t);
 		ref_release(s);
 	}
+
+	ref_release(control);
+	ref_release(list);
+
+	return 0;
+}
+
+static int
+rd_shows(struct path_info *info, void *buf, fuse_fill_dir_t filler,
+       off_t offset, struct fuse_file_info *fi)
+{
+	int i;
+	cmyth_conn_t control;
+	cmyth_proglist_t list;
+	int count;
+
+	pthread_mutex_lock(&mutex);
+
+	if ((i=lookup_server(info->host)) < 0) {
+		pthread_mutex_unlock(&mutex);
+		return 0;
+	}
+
+	control = ref_hold(conn[i].control);
+
+	if (conn[i].list == NULL) {
+		list = cmyth_proglist_get_all_recorded(control);
+		conn[i].list = list;
+	} else {
+		list = conn[i].list;
+	}
+
+	list = ref_hold(list);
+
+	pthread_mutex_unlock(&mutex);
+
+	count = cmyth_proglist_get_count(list);
+  if(info->subdir) {
+    for (i=0; i<count; i++) {
+      cmyth_proginfo_t prog;
+      long long len;
+      char *fn, *pn, *t, *s;
+      struct stat st;
+      char tmp[512];
+      
+      prog = cmyth_proglist_get_item(list, i);
+      pn = cmyth_proginfo_pathname(prog);
+      t = cmyth_proginfo_title(prog);
+      if(strcmp(t, info->subdir) == 0) {
+        s = cmyth_proginfo_subtitle(prog);
+        len = cmyth_proginfo_length(prog);
+      
+        snprintf(tmp, sizeof(tmp), "%s.nuv", s);
+      
+        fn = pn+1;
+      
+        memset(&st, 0, sizeof(st));
+        st.st_mode = S_IFLNK | 0444;
+        st.st_size = strlen(pn) + 8;
+        
+        debug("%s(): file '%s' len %lld\n", __FUNCTION__, fn, len);
+        filler(buf, tmp, &st, 0);
+        ref_release(s);
+      }
+      ref_release(prog);
+      ref_release(pn);
+      ref_release(t);
+    }
+  } else {
+    char** seen = malloc(sizeof(char*) * count);
+    int seen_counter, k;
+
+    seen_counter = 0;
+    memset(seen, count, sizeof(char*));
+    
+    for (i=0; i<count; i++) {
+      cmyth_proginfo_t prog;
+      char *t;
+      struct stat st;
+      char found;
+      prog = cmyth_proglist_get_item(list, i);
+      t = cmyth_proginfo_title(prog);
+      
+      found = 0;
+      for(k=0; k<seen_counter; k++) {
+        if(strcmp(seen[k], t) == 0) {
+          found = 1;
+          break;
+        }
+      }
+      
+      if(!found) {
+        seen[seen_counter] = strdup(t);
+        seen_counter++;
+        
+        st.st_mode = S_IFDIR | 0555;
+        st.st_nlink = 2;
+        
+        debug("%s(): dir '%s'\n", __FUNCTION__, t);
+        filler(buf, t, &st, 0);
+      }
+      ref_release(prog);
+      ref_release(t);
+    }
+    
+    for(i=0; i<seen_counter; i++) {
+      free(seen[i]);
+    }
+    free(seen);
+  }
 
 	ref_release(control);
 	ref_release(list);
