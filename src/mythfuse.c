@@ -92,15 +92,15 @@ static int ga_files(struct path_info*, struct stat*);
 static int o_files(int, struct path_info*, struct fuse_file_info *fi);
 static int rd_all(struct path_info*, void*, fuse_fill_dir_t, off_t,
 		  struct fuse_file_info*);
-static int ga_all(struct path_info*, struct stat*);
+static int ga_all_shows(struct path_info*, struct stat*);
 
 static int rd_shows(struct path_info*, void*, fuse_fill_dir_t, off_t,
 		  struct fuse_file_info*);
 
 static struct dir_cb dircb[] = {
 	{ "files", rd_files, ga_files, o_files },
-	{ "all", rd_all, ga_all, NULL },
-  { "shows", rd_shows, ga_files, o_files },
+	{ "all", rd_all, ga_all_shows, NULL },
+  { "shows", rd_shows, ga_all_shows, o_files },
 	{ NULL, NULL, NULL, NULL },
 };
 
@@ -670,12 +670,12 @@ rd_shows(struct path_info *info, void *buf, fuse_fill_dir_t filler,
       char tmp[512];
       
       prog = cmyth_proglist_get_item(list, i);
-      pn = cmyth_proginfo_pathname(prog);
       t = cmyth_proginfo_title(prog);
       if(strcmp(t, info->subdir) == 0) {
+        pn = cmyth_proginfo_pathname(prog);
         s = cmyth_proginfo_subtitle(prog);
         len = cmyth_proginfo_length(prog);
-      
+
         snprintf(tmp, sizeof(tmp), "%s.nuv", s);
       
         fn = pn+1;
@@ -686,10 +686,10 @@ rd_shows(struct path_info *info, void *buf, fuse_fill_dir_t filler,
         
         debug("%s(): file '%s' len %lld\n", __FUNCTION__, fn, len);
         filler(buf, tmp, &st, 0);
+        ref_release(pn);
         ref_release(s);
       }
       ref_release(prog);
-      ref_release(pn);
       ref_release(t);
     }
   } else {
@@ -881,7 +881,7 @@ static int ga_files(struct path_info *info, struct stat *stbuf)
 	return -ENOENT;
 }
 
-static int ga_all(struct path_info *info, struct stat *stbuf)
+static int ga_all_shows(struct path_info *info, struct stat *stbuf)
 {
 	cmyth_conn_t control;
 	cmyth_proglist_t list;
@@ -925,9 +925,13 @@ static int ga_all(struct path_info *info, struct stat *stbuf)
 		title = cmyth_proginfo_title(prog);
 		s = cmyth_proginfo_subtitle(prog);
 
-		snprintf(tmp, sizeof(tmp), "%s - %s.nuv", title, s);
+    if(info->subdir) {
+      snprintf(tmp, sizeof(tmp), "%s.nuv", s);
+    } else {
+      snprintf(tmp, sizeof(tmp), "%s - %s.nuv", title, s);
+    }
 
-		if (strcmp(tmp, info->file) == 0) {
+		if ((info->subdir && strcmp(info->subdir, title) == 0 && strcmp(tmp, info->file) == 0) || (!info->subdir && strcmp(tmp, info->file) == 0)) {
 			cmyth_timestamp_t ts;
 			time_t t;
 			char *pn;
@@ -1161,7 +1165,7 @@ static int myth_readlink(const char *path, char *buf, size_t size)
 		return -ENOENT;
 	}
 
-	if (strcmp(info.dir, "all") != 0) {
+	if (strcmp(info.dir, "all") != 0 && strcmp(info.dir, "shows") != 0) {
 		return -ENOENT;
 	}
 
@@ -1197,10 +1201,18 @@ static int myth_readlink(const char *path, char *buf, size_t size)
 		s = cmyth_proginfo_subtitle(prog);
 		pn = cmyth_proginfo_pathname(prog);
 
-		snprintf(tmp, sizeof(tmp), "%s - %s.nuv", t, s);
+    if(info.subdir) {
+      snprintf(tmp, sizeof(tmp), "%s.nuv", s);
+    } else {
+      snprintf(tmp, sizeof(tmp), "%s - %s.nuv", t, s);
+    }
 
-		if (strcmp(tmp, info.file) == 0) {
-			snprintf(tmp, sizeof(tmp), "../files%s", pn);
+		if ((info.subdir && strcmp(t, info.subdir) == 0 && strcmp(tmp, info.file) == 0) || (!info.subdir && strcmp(tmp, info.file) == 0)) {
+      if(info.subdir) {
+        snprintf(tmp, sizeof(tmp), "../../files%s", pn);
+      } else {
+        snprintf(tmp, sizeof(tmp), "../files%s", pn);
+      }
 
 			n = (strlen(tmp) > size) ? size : strlen(tmp);
 			strncpy(buf, tmp, n);
