@@ -100,7 +100,7 @@ static int rd_shows(struct path_info*, void*, fuse_fill_dir_t, off_t,
 static struct dir_cb dircb[] = {
 	{ "files", rd_files, ga_files, o_files },
 	{ "all", rd_all, ga_all_shows, NULL },
-  { "shows", rd_shows, ga_all_shows, o_files },
+  { "shows", rd_shows, ga_all_shows, NULL },
 	{ NULL, NULL, NULL, NULL },
 };
 
@@ -326,7 +326,7 @@ static void myth_destroy(void *arg)
 }
 
 static int
-do_open(cmyth_proginfo_t prog, struct fuse_file_info *fi, int i)
+do_open(cmyth_proginfo_t prog, struct fuse_file_info *fi, int i, char thumbnail)
 {
 	cmyth_conn_t c = NULL;
 	cmyth_file_t f = NULL;
@@ -346,10 +346,17 @@ do_open(cmyth_proginfo_t prog, struct fuse_file_info *fi, int i)
 		return -1;
 	}
 
-	if ((f=cmyth_conn_connect_file(prog, c, MAX_BSIZE,
-				       tcp_program)) == NULL) {
-		return -1;
-	}
+  if(thumbnail) {
+    if ((f=cmyth_conn_connect_thumbnail(prog, c, MAX_BSIZE,
+                                   tcp_program)) == NULL) {
+      return -1;
+    }
+  } else {
+    if ((f=cmyth_conn_connect_file(prog, c, MAX_BSIZE,
+                                   tcp_program)) == NULL) {
+      return -1;
+    }
+  }
 
 	ref_release(host);
 	ref_release(c);
@@ -397,12 +404,19 @@ static int o_files(int f, struct path_info *info, struct fuse_file_info *fi)
 	for (i=0; i<count; i++) {
 		cmyth_proginfo_t prog;
 		char *pn;
-
+    unsigned int name_len;
 		prog = cmyth_proglist_get_item(list, i);
 		pn = cmyth_proginfo_pathname(prog);
+    name_len = strlen(pn+1);
+		if (strncmp(pn+1, info->file, name_len) == 0) {
+      char thumbnail;
+      if(strlen(info->file) == name_len) {
+        thumbnail = 0;
+      } else {
+        thumbnail = 1;
+      }
 
-		if (strcmp(pn+1, info->file) == 0) {
-			if (do_open(prog, fi, f) < 0) {
+			if (do_open(prog, fi, f, thumbnail) < 0) {
 				ref_release(pn);
 				ref_release(prog);
 				goto out;
@@ -540,7 +554,7 @@ rd_files(struct path_info *info, void *buf, fuse_fill_dir_t filler,
 		long long len;
 		char *fn, *pn;
 		struct stat st;
-
+    char tmp[512];
 		prog = cmyth_proglist_get_item(list, i);
 		pn = cmyth_proginfo_pathname(prog);
 		len = cmyth_proginfo_length(prog);
@@ -554,6 +568,13 @@ rd_files(struct path_info *info, void *buf, fuse_fill_dir_t filler,
 		debug("%s(): file '%s' len %lld\n", __FUNCTION__, fn, len);
 		filler(buf, fn, &st, 0);
 
+    // add a file for the thumbnail
+		memset(&st, 0, sizeof(st));
+		st.st_mode = S_IFREG | 0444;
+		st.st_size = 0;
+    snprintf(tmp, sizeof(tmp), "%s.png", fn);
+		filler(buf, tmp, &st, 0);
+    
 		ref_release(prog);
 		ref_release(pn);
 	}
@@ -668,24 +689,32 @@ rd_shows(struct path_info *info, void *buf, fuse_fill_dir_t filler,
       char *fn, *pn, *t, *s;
       struct stat st;
       char tmp[512];
-      
+
       prog = cmyth_proglist_get_item(list, i);
       t = cmyth_proginfo_title(prog);
       if(strcmp(t, info->subdir) == 0) {
         pn = cmyth_proginfo_pathname(prog);
         s = cmyth_proginfo_subtitle(prog);
         len = cmyth_proginfo_length(prog);
-
-        snprintf(tmp, sizeof(tmp), "%s.nuv", s);
       
         fn = pn+1;
-      
+
+        snprintf(tmp, sizeof(tmp), "%s.nuv", s);      
         memset(&st, 0, sizeof(st));
         st.st_mode = S_IFLNK | 0444;
         st.st_size = strlen(pn) + 8;
         
         debug("%s(): file '%s' len %lld\n", __FUNCTION__, fn, len);
         filler(buf, tmp, &st, 0);
+
+        snprintf(tmp, sizeof(tmp), "%s.nuv.png", s);      
+        memset(&st, 0, sizeof(st));
+        st.st_mode = S_IFLNK | 0444;
+        st.st_size = strlen(pn) + 8;
+        
+        debug("%s(): file '%s' len %lld\n", __FUNCTION__, fn, len);
+        filler(buf, tmp, &st, 0);
+
         ref_release(pn);
         ref_release(s);
       }
@@ -848,16 +877,22 @@ static int ga_files(struct path_info *info, struct stat *stbuf)
 		cmyth_proginfo_t prog;
 		long long len;
 		char *pn;
+    unsigned int name_len;
 
 		prog = cmyth_proglist_get_item(list, i);
 		pn = cmyth_proginfo_pathname(prog);
-
-		if (strcmp(pn+1, info->file) == 0) {
+    name_len = strlen(pn+1);
+		if (strncmp(pn+1, info->file, name_len) == 0) {
 			cmyth_timestamp_t ts;
 			time_t t;
-			len = cmyth_proginfo_length(prog);
+
+      if(strlen(info->file) == name_len) {
+        len = cmyth_proginfo_length(prog);
+      } else {
+        len = MAX_BSIZE;
+      }
 			debug("%s(): file '%s' len %lld\n",
-			      __FUNCTION__, pn+1, len);
+			      __FUNCTION__, info->file, len);      
 			stbuf->st_size = len;
 			ts = cmyth_proginfo_rec_end(prog);
 			t = cmyth_timestamp_to_unixtime(ts);
@@ -920,7 +955,7 @@ static int ga_all_shows(struct path_info *info, struct stat *stbuf)
 		long long len;
 		char *title, *s;
 		char tmp[512];
-
+    unsigned int name_len;
 		prog = cmyth_proglist_get_item(list, i);
 		title = cmyth_proginfo_title(prog);
 		s = cmyth_proginfo_subtitle(prog);
@@ -931,7 +966,8 @@ static int ga_all_shows(struct path_info *info, struct stat *stbuf)
       snprintf(tmp, sizeof(tmp), "%s - %s.nuv", title, s);
     }
 
-		if ((info->subdir && strcmp(info->subdir, title) == 0 && strcmp(tmp, info->file) == 0) || (!info->subdir && strcmp(tmp, info->file) == 0)) {
+    name_len = strlen(tmp);
+		if ((info->subdir && strcmp(info->subdir, title) == 0 && strncmp(tmp, info->file, name_len) == 0) || (!info->subdir && strcmp(tmp, info->file) == 0)) {
 			cmyth_timestamp_t ts;
 			time_t t;
 			char *pn;
@@ -1195,6 +1231,7 @@ static int myth_readlink(const char *path, char *buf, size_t size)
 		cmyth_proginfo_t prog;
 		char tmp[512];
 		char *t, *s, *pn;
+    unsigned int name_len;
 
 		prog = cmyth_proglist_get_item(list, i);
 		t = cmyth_proginfo_title(prog);
@@ -1207,9 +1244,15 @@ static int myth_readlink(const char *path, char *buf, size_t size)
       snprintf(tmp, sizeof(tmp), "%s - %s.nuv", t, s);
     }
 
-		if ((info.subdir && strcmp(t, info.subdir) == 0 && strcmp(tmp, info.file) == 0) || (!info.subdir && strcmp(tmp, info.file) == 0)) {
+    name_len = strlen(tmp);
+		if ((info.subdir && strcmp(t, info.subdir) == 0 && strncmp(tmp, info.file, name_len) == 0) || (!info.subdir && strcmp(tmp, info.file) == 0)) {
       if(info.subdir) {
-        snprintf(tmp, sizeof(tmp), "../../files%s", pn);
+        if(strlen(info.file) == name_len) {      
+          snprintf(tmp, sizeof(tmp), "../../files%s", pn);
+        } else {
+          // it's a thumbnail request
+          snprintf(tmp, sizeof(tmp), "../../files%s.png", pn);
+        }
       } else {
         snprintf(tmp, sizeof(tmp), "../files%s", pn);
       }
